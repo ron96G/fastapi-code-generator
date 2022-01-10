@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
-{{imports}}
+from .routes import *
+
+common_responses = {
+    501: {
+        "description": "The requested controller has not been implemented"
+    }
+}
 
 app = FastAPI(
     {% if info %}
@@ -11,27 +18,29 @@ app = FastAPI(
     {{ key }} = {{info_value}},
     {% endfor %}
     {% endif %}
+    responses = {**common_responses},
     )
 
 
+@app.exception_handler(NotImplementedException)
+async def not_implemented_exception_handler(
+    request: Request, 
+    exc: NotImplementedException
+):
+    return JSONResponse(
+        status_code=501,
+        content={"message": "The requested controller has not been implemented"},
+    )
+@app.exception_handler(HTTPException)
+async def default_exception_handler(
+    request: Request, exc: HTTPException
+):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"message": exc.detail},
+    )
+
+controller = Controller()
 {% for operation in operations %}
-@app.{{operation.type}}('{{operation.snake_case_path}}', response_model={{operation.response}}
-    {% if operation.additional_responses %}
-        , responses={
-            {% for status_code, models in operation.additional_responses.items() %}
-                '{{ status_code }}': {
-                {% for key, model in models.items() %}
-                    '{{ key }}': {{ model }}{% if not loop.last %},{% endif %}
-                {% endfor %}
-                }{% if not loop.last %},{% endif %}
-            {% endfor %}
-        }
-    {% endif %})
-def {{operation.function_name}}({{operation.snake_case_arguments}}) -> {{operation.return_type}}:
-    {%- if operation.summary %}
-    """
-    {{ operation.summary }}
-    """
-    {%- endif %}
-    pass
+configure_routes_{{ operation.cleaned_path }}(app, controller)
 {% endfor %}

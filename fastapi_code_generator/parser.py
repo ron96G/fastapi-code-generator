@@ -119,6 +119,7 @@ class Operation(CachedPropertyModel):
     tags: Optional[List[str]]
     arguments: str = ''
     snake_case_arguments: str = ''
+    argument_names: str = ''
     request: Optional[Argument] = None
     response: str = ''
     additional_responses: Dict[str, Dict[str, str]] = {}
@@ -141,6 +142,11 @@ class Operation(CachedPropertyModel):
         return re.sub(
             r"{([^\}]+)}", lambda m: stringcase.snakecase(m.group()), self.path
         )
+
+    @cached_property
+    def cleaned_path(self) -> str:
+        replaced_slash = re.sub(r'[/]', '_', self.snake_case_path)
+        return re.sub(r'[\}\{}]', '', replaced_slash)
 
     @cached_property
     def function_name(self) -> str:
@@ -250,7 +256,10 @@ class OpenAPIParser(OpenAPIModelParser):
         self._temporary_operation['_parameters'].append(parameters)
 
     def get_parameter_type(
-        self, parameters: ParameterObject, snake_case: bool, path: List[str],
+        self,
+        parameters: ParameterObject,
+        snake_case: bool,
+        path: List[str],
     ) -> Optional[Argument]:
         orig_name = parameters.name
         if snake_case:
@@ -307,6 +316,11 @@ class OpenAPIParser(OpenAPIModelParser):
             argument.argument for argument in self.get_argument_list(snake_case, path)
         )
 
+    def get_argument_names(self, snake_case: bool, path: List[str]) -> str:
+        return ", ".join(
+            argument.name for argument in self.get_argument_list(snake_case, path)
+        )
+
     def get_argument_list(self, snake_case: bool, path: List[str]) -> List[Argument]:
         arguments: List[Argument] = []
 
@@ -332,7 +346,10 @@ class OpenAPIParser(OpenAPIModelParser):
         return arguments
 
     def parse_request_body(
-        self, name: str, request_body: RequestBodyObject, path: List[str],
+        self,
+        name: str,
+        request_body: RequestBodyObject,
+        path: List[str],
     ) -> None:
         super().parse_request_body(name, request_body, path)
         arguments: List[Argument] = []
@@ -343,6 +360,7 @@ class OpenAPIParser(OpenAPIModelParser):
             if isinstance(
                 media_obj.schema_, (JsonSchemaObject, ReferenceObject)
             ):  # pragma: no cover
+
                 # TODO: support other content-types
                 if RE_APPLICATION_JSON_PATTERN.match(media_type):
                     if isinstance(media_obj.schema_, ReferenceObject):
@@ -372,6 +390,24 @@ class OpenAPIParser(OpenAPIModelParser):
                     self.imports_for_fastapi.append(
                         Import.from_full_path('starlette.requests.Request')
                     )
+
+                elif media_type == "multipart/form-data":
+                    # a file upload
+                    arguments.append(
+                        Argument(
+                            name='file',  # type: ignore
+                            default='File(default=None)',
+                            type_hint='UploadFile',  # type: ignore
+                            required=True,
+                        )
+                    )
+                    self.imports_for_fastapi.append(
+                        [
+                            Import.from_full_path('fastapi.UploadFile'),
+                            Import.from_full_path('fastapi.param_functions.File'),
+                        ]
+                    )
+
         self._temporary_operation['_request'] = arguments[0] if arguments else None
 
     def parse_responses(
@@ -380,7 +416,11 @@ class OpenAPIParser(OpenAPIModelParser):
         responses: Dict[str, Union[ResponseObject, ReferenceObject]],
         path: List[str],
     ) -> Dict[str, Dict[str, DataType]]:
+
         data_types = super().parse_responses(name, responses, path)
+        return_types = {}
+
+        ## Sets default 200 response
         status_code_200 = data_types.get('200')
         if status_code_200:
             data_type = list(status_code_200.values())[0]
@@ -389,28 +429,60 @@ class OpenAPIParser(OpenAPIModelParser):
         else:
             data_type = DataType(type='None')
         type_hint = data_type.type_hint  # TODO: change to lazy loading
+
+        if type_hint == "bytes":
+            self.imports_for_fastapi.append(
+                Import.from_full_path('starlette.responses.StreamingResponse')
+            )
+            data_type = DataType(type="FileResponse")
+
         self._temporary_operation['response'] = type_hint
         return_types = {type_hint: data_type}
+
+        ## All other responses but 200
         for status_code, additional_responses in data_types.items():
-            if status_code != '200' and additional_responses:  # 200 is processed above
+
+            if additional_responses:
+                type_hint = Any
                 data_type = list(additional_responses.values())[0]
                 if data_type:
                     self.data_types.append(data_type)
+
                 type_hint = data_type.type_hint  # TODO: change to lazy loading
+
+                response = responses.get(status_code)
+                if 'description' in response:
+                    description = response['description']
+                else:
+                    description = None
+
                 self._temporary_operation.setdefault('additional_responses', {})[
                     status_code
-                ] = {'model': type_hint}
+                ] = {
+                    'model': type_hint,
+                    'description': f'\'{description}\''
+                    if description != None
+                    else '\'foo\'',
+                }
+
                 return_types[type_hint] = data_type
+
         if len(return_types) == 1:
             return_type = next(iter(return_types.values()))
         else:
             return_type = DataType(data_types=list(return_types.values()))
+
         if return_type:
             self.data_types.append(return_type)
+
         self._temporary_operation['return_type'] = return_type.type_hint
         return data_types
 
-    def parse_operation(self, raw_operation: Dict[str, Any], path: List[str],) -> None:
+    def parse_operation(
+        self,
+        raw_operation: Dict[str, Any],
+        path: List[str],
+    ) -> None:
         self._temporary_operation = {}
         self._temporary_operation['_parameters'] = []
         super().parse_operation(raw_operation, path)
@@ -424,9 +496,15 @@ class OpenAPIParser(OpenAPIModelParser):
             snake_case=True, path=path
         )
 
+        self._temporary_operation['argument_names'] = self.get_argument_names(
+            snake_case=True, path=path
+        )
+
         self.operations[resolved_path] = Operation(
             **raw_operation,
             **self._temporary_operation,
             path=f'/{path_name}',  # type: ignore
             method=method,  # type: ignore
         )
+
+        print(self.operations[resolved_path].description)

@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.exceptions import HTTPException
+
+{{imports}}
+
+
+class FileResponse(StreamingResponse):
+    media_type = '*/*'
+class NotImplementedException(Exception):
+    pass
+
+class Controller:
+{% for operation in operations %}
+    async def {{ operation.function_name }}(self, {{operation.argument_names}}) -> {{operation.return_type}}:
+        raise NotImplementedException()
+{% endfor %}
+
+
+{% for operation in operations %}
+def configure_routes_{{ operation.cleaned_path }}(app: FastAPI, controller: Controller):
+    @app.{{operation.type}}('{{operation.snake_case_path}}',
+        response_model={{operation.response}},
+        response_model_exclude_none=True
+        {% if operation.response == "bytes" %} 
+            , response_class=FileResponse
+        {% endif %}  
+        {% if operation.tags %}
+            , tags = {{ operation.tags }}
+        {% endif %}
+        {% if operation.additional_responses %}
+            , responses={
+                {% for status_code, models in operation.additional_responses.items() %}
+                    '{{ status_code }}': {
+                    {% for key, model in models.items() %}
+                        '{{ key }}': {{ model }}{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                    }{% if not loop.last %},{% endif %}
+                {% endfor %}
+            }
+        {% endif %})
+    async def {{operation.function_name}}({{operation.snake_case_arguments}}) -> {{operation.return_type}}:
+        {%- if operation.summary %}
+        """
+        {{ operation.summary }}
+        {{ operation.description }}
+        """
+        {%- endif %}
+
+        return await controller.{{ operation.function_name }}({{operation.argument_names}})
+
+{% endfor %}
